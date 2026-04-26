@@ -1,4 +1,8 @@
 import * as cheerio from 'cheerio';
+import puppeteer from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+
+puppeteer.use(StealthPlugin());
 
 const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.112 Safari/537.36";
 
@@ -166,6 +170,52 @@ export async function extractShortlinks(postUrl: string, type: 'movie' | 'tv' = 
   }
 }
 
+async function bypassModproWithPuppeteer(shortUrl: string) {
+    console.log(`[Scraper] Falling back to Puppeteer Stealth for: ${shortUrl}`);
+    const browser = await puppeteer.launch({
+        headless: true,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
+
+    try {
+        const page = await browser.newPage();
+        await page.goto(shortUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        
+        try {
+            await page.waitForSelector('a.maxbutton-fast-server-gdrive', { timeout: 5000 });
+            await page.click('a.maxbutton-fast-server-gdrive');
+            await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+        } catch(e) {}
+
+        await page.waitForSelector('input[name="_wp_http"]', { timeout: 15000 });
+        await page.evaluate(() => {
+            const form = document.querySelector('form');
+            if(form) form.submit();
+        });
+        
+        await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        await page.waitForSelector('input[name="_wp_http2"]', { timeout: 15000 });
+        await page.evaluate(() => {
+            const form = document.querySelector('form');
+            if(form) form.submit();
+        });
+        
+        await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {});
+        await new Promise(r => setTimeout(r, 4000));
+        
+        const finalUrl = page.url();
+        console.log(`[Scraper] Puppeteer reached URL: ${finalUrl}`);
+        return finalUrl;
+        
+    } catch (e) {
+         console.error(`[Scraper] Puppeteer Bypass Error:`, e);
+         return null;
+    } finally {
+        await browser.close();
+    }
+}
+
 export async function bypassModpro(shortUrl: string) {
     const defaultHeaders = {
         "User-Agent": USER_AGENT,
@@ -189,7 +239,8 @@ export async function bypassModpro(shortUrl: string) {
 
         const wpHttpInput = $('input[name="_wp_http"]').attr('value');
         if (!wpHttpInput) {
-            throw new Error("Could not find _wp_http token.");
+            console.log(`[Scraper] Could not find _wp_http token via HTTP. Cloudflare challenge detected.`);
+            return await bypassModproWithPuppeteer(shortUrl);
         }
 
         let formAction = $('form').attr('action');
